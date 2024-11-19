@@ -8,11 +8,11 @@ import (
 
 	"github.com/malav4all/kafka-mongodb-consumer/models"
 
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// Database represents a MongoDB database
 // Database represents a MongoDB database
 type Database struct {
 	Client   *mongo.Client
@@ -34,6 +34,14 @@ func Connect(uri, dbName string) Database {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
 
+	// Ping MongoDB to ensure the connection is successful
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatalf("Failed to ping MongoDB: %v", err)
+	}
+
+	log.Println("Successfully connected to MongoDB")
+
 	return Database{
 		Client:   client,
 		Database: client.Database(dbName),
@@ -44,18 +52,28 @@ func Connect(uri, dbName string) Database {
 func (db Database) Disconnect() {
 	if err := db.Client.Disconnect(context.Background()); err != nil {
 		log.Printf("Error disconnecting from MongoDB: %v", err)
+	} else {
+		log.Println("MongoDB connection closed")
 	}
 }
 
-// Insert inserts a document into a collection
-func (db Database) Insert(collectionName string, data models.Data) error {
+// InsertBulk uses BulkWrite to insert multiple documents into a collection
+func (db Database) InsertBulk(collectionName string, data []models.Data) error {
 	collection := db.Database.Collection(collectionName)
-	_, err := collection.InsertOne(context.Background(), bson.M{
-		"key":   data.Key,
-		"value": data.Value,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to insert document: %w", err)
+
+	// Preallocate slice capacity to avoid resizing during append
+	bulkOps := make([]mongo.WriteModel, 0, len(data))
+	for _, d := range data {
+		bulkOps = append(bulkOps, mongo.NewInsertOneModel().SetDocument(d))
 	}
+
+	// Perform BulkWrite operation
+	bulkWriteOptions := options.BulkWrite().SetOrdered(false)
+	result, err := collection.BulkWrite(context.Background(), bulkOps, bulkWriteOptions)
+	if err != nil {
+		return fmt.Errorf("failed to perform bulk write: %w", err)
+	}
+
+	log.Printf("Bulk write completed: %d inserted, %d modified", result.InsertedCount, result.ModifiedCount)
 	return nil
 }
