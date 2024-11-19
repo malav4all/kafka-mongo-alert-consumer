@@ -6,8 +6,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/malav4all/kafka-mongodb-consumer/models"
-
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -58,7 +56,7 @@ func (db Database) Disconnect() {
 }
 
 // InsertBulk uses BulkWrite to insert multiple documents into a collection
-func (db Database) InsertBulk(collectionName string, data []models.Data) error {
+func (db Database) InsertBulk(collectionName string, data []map[string]interface{}) error {
 	collection := db.Database.Collection(collectionName)
 
 	// Preallocate slice capacity to avoid resizing during append
