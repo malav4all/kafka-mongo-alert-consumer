@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"os"
 	"sync"
 	"time"
 
@@ -14,71 +12,31 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-// OffsetStore manages the storage and retrieval of offsets
-type OffsetStore struct {
-	FilePath string
-	mutex    sync.Mutex
-}
-
-// GetOffset retrieves the last committed offset from the file
-func (store *OffsetStore) GetOffset() int64 {
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
-
-	data, err := ioutil.ReadFile(store.FilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return kafka.FirstOffset
-		}
-		log.Printf("Error reading offset file: %v", err)
-		return kafka.FirstOffset
-	}
-
-	var offset int64
-	if _, err := fmt.Sscanf(string(data), "%d", &offset); err != nil {
-		log.Printf("Error parsing offset: %v", err)
-		return kafka.FirstOffset
-	}
-
-	return offset
-}
-
-// SaveOffset saves the latest offset to the file
-func (store *OffsetStore) SaveOffset(offset int64) {
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
-
-	data := []byte(fmt.Sprintf("%d", offset))
-	if err := ioutil.WriteFile(store.FilePath, data, 0644); err != nil {
-		log.Printf("Error writing offset file: %v", err)
-	}
-}
-
 // StartConsumer listens to a Kafka topic and processes incoming messages
 func StartConsumer(brokers, topic string, db mongodb.Database) error {
-	offsetStore := &OffsetStore{FilePath: "offset.txt"}
-	lastOffset := offsetStore.GetOffset()
-
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:   []string{brokers},
-		Topic:     topic,
-		Partition: 0, // Specify the partition
-		MinBytes:  1,
-		MaxBytes:  10e6,
+		Brokers:  []string{brokers},
+		Topic:    topic,
+		GroupID:  "socket310pconsumer",
+		MinBytes: 1,
+		MaxBytes: 10e6,
 	})
-	r.SetOffset(lastOffset)
 
-	defer r.Close()
-	fmt.Printf("Listening to topic: %s from offset: %d\n", topic, lastOffset)
+	defer func() {
+		if err := r.Close(); err != nil {
+			log.Printf("Error closing Kafka reader: %v", err)
+		}
+	}()
+	fmt.Printf("Listening to topic: %s with GroupID: %s\n", topic, "socket301p")
 
 	var (
 		batch         []map[string]interface{}
-		batchOffsets  []int64
 		batchSize     = 10
 		flushInterval = 5 * time.Second
 		mutex         sync.Mutex
 		flushTimer    = time.NewTimer(flushInterval)
 	)
+
 	// Flush function to handle bulk writing and memory cleanup
 	flush := func() {
 		mutex.Lock()
@@ -86,20 +44,16 @@ func StartConsumer(brokers, topic string, db mongodb.Database) error {
 
 		if len(batch) > 0 {
 			// Perform bulk write to MongoDB
-			if err := db.InsertBulk("collection_name", batch); err != nil {
+			if err := db.InsertBulk("TRACK_DATA", batch); err != nil {
 				log.Printf("Error during bulk write: %v", err)
+			} else {
+				log.Printf("Batch flushed to MongoDB with %d documents", len(batch))
 			}
 
-			// Commit the offset after successful processing
-			latestOffset := batchOffsets[len(batchOffsets)-1] + 1
-			offsetStore.SaveOffset(latestOffset)
-
-			// Clear batch and offsets to release memory
+			// Clear batch to release memory
 			batch = nil
-			batchOffsets = nil
-			log.Printf("Batch flushed to MongoDB and offset %d committed", latestOffset)
+			flushTimer.Reset(flushInterval)
 		}
-		flushTimer.Reset(flushInterval)
 	}
 
 	// Goroutine to handle timer-based flushing
@@ -110,10 +64,10 @@ func StartConsumer(brokers, topic string, db mongodb.Database) error {
 	}()
 
 	for {
-		// Read message from Kafka
-		m, err := r.ReadMessage(context.Background())
+		// Fetch message from Kafka
+		m, err := r.FetchMessage(context.Background())
 		if err != nil {
-			log.Printf("Error reading message: %v", err)
+			log.Printf("Error fetching message: %v", err)
 			continue
 		}
 
@@ -127,12 +81,18 @@ func StartConsumer(brokers, topic string, db mongodb.Database) error {
 		// Add to batch with thread safety
 		mutex.Lock()
 		batch = append(batch, data)
-		batchOffsets = append(batchOffsets, m.Offset)
 		mutex.Unlock()
 
 		// If batch size reaches the limit, flush it
 		if len(batch) >= batchSize {
 			flush()
+
+			// Commit the offset for the batch
+			if err := r.CommitMessages(context.Background(), m); err != nil {
+				log.Printf("Error committing message offset: %v", err)
+			} else {
+				log.Printf("Offset committed successfully: %d", m.Offset)
+			}
 		}
 	}
 }
