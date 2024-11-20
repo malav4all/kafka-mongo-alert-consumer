@@ -15,11 +15,12 @@ import (
 // StartConsumer listens to a Kafka topic and processes incoming messages
 func StartConsumer(brokers, topic string, db mongodb.Database) error {
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{brokers},
-		Topic:    topic,
-		GroupID:  "socket310pconsumer",
-		MinBytes: 1,
-		MaxBytes: 10e6,
+		Brokers:     []string{brokers},
+		Topic:       topic,
+		GroupID:     "socket310pconsumer",
+		MinBytes:    1,
+		MaxBytes:    10e6,
+		StartOffset: kafka.FirstOffset, // Start from the earliest offset
 	})
 
 	defer func() {
@@ -27,72 +28,92 @@ func StartConsumer(brokers, topic string, db mongodb.Database) error {
 			log.Printf("Error closing Kafka reader: %v", err)
 		}
 	}()
-	fmt.Printf("Listening to topic: %s with GroupID: %s\n", topic, "socket301p")
+	fmt.Printf("Listening to topic: %s with GroupID: %s\n", topic, "socket310pconsumer")
 
 	var (
 		batch         []map[string]interface{}
 		batchSize     = 10
 		flushInterval = 5 * time.Second
 		mutex         sync.Mutex
-		flushTimer    = time.NewTimer(flushInterval)
 	)
 
-	// Flush function to handle bulk writing and memory cleanup
-	flush := func() {
-		mutex.Lock()
-		defer mutex.Unlock()
+	// Ticker to trigger flush at regular intervals
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
 
-		if len(batch) > 0 {
-			// Perform bulk write to MongoDB
-			if err := db.InsertBulk("TRACK_DATA", batch); err != nil {
-				log.Printf("Error during bulk write: %v", err)
-			} else {
-				log.Printf("Batch flushed to MongoDB with %d documents", len(batch))
-			}
+	// Channels to handle messages and errors from Kafka
+	messages := make(chan kafka.Message)
+	errorsChan := make(chan error)
 
-			// Clear batch to release memory
-			batch = nil
-			flushTimer.Reset(flushInterval)
-		}
-	}
-
-	// Goroutine to handle timer-based flushing
+	// Goroutine to read messages from Kafka
 	go func() {
-		for range flushTimer.C {
-			flush()
+		for {
+			m, err := r.FetchMessage(context.Background())
+			if err != nil {
+				errorsChan <- err
+				return
+			}
+			messages <- m
 		}
 	}()
 
 	for {
-		// Fetch message from Kafka
-		m, err := r.FetchMessage(context.Background())
-		if err != nil {
-			log.Printf("Error fetching message: %v", err)
-			continue
-		}
+		select {
+		case m := <-messages:
+			// Parse JSON message
+			var data map[string]interface{}
+			if err := json.Unmarshal(m.Value, &data); err != nil {
+				log.Printf("Invalid JSON message: %s\n", string(m.Value))
+				// Commit the offset even for invalid messages to prevent re-processing
+				if err := r.CommitMessages(context.Background(), m); err != nil {
+					log.Printf("Error committing message offset: %v", err)
+				}
+				continue
+			}
 
-		// Parse JSON message
-		var data map[string]interface{}
-		if err := json.Unmarshal(m.Value, &data); err != nil {
-			log.Printf("Invalid JSON message: %s\n", string(m.Value))
-			continue
-		}
+			// Add to batch with thread safety
+			mutex.Lock()
+			batch = append(batch, data)
+			mutex.Unlock()
 
-		// Add to batch with thread safety
-		mutex.Lock()
-		batch = append(batch, data)
-		mutex.Unlock()
+			// If batch size reaches the limit, flush it
+			if len(batch) >= batchSize {
+				flush(&batch, db, &mutex)
+			}
 
-		// If batch size reaches the limit, flush it
-		if len(batch) >= batchSize {
-			flush()
-
-			// Commit the offset for the batch
+			// Commit the offset after processing
 			if err := r.CommitMessages(context.Background(), m); err != nil {
 				log.Printf("Error committing message offset: %v", err)
 			} else {
 				log.Printf("Offset committed successfully: %d", m.Offset)
 			}
+
+		case err := <-errorsChan:
+			log.Printf("Error fetching message: %v", err)
+			// Handle error as needed, possibly exit or attempt recovery
+			return err
+
+		case <-ticker.C:
+			// Flush at regular intervals regardless of batch size
+			flush(&batch, db, &mutex)
 		}
+	}
+}
+
+// flush handles bulk writing and memory cleanup
+func flush(batch *[]map[string]interface{}, db mongodb.Database, mutex *sync.Mutex) {
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	if len(*batch) > 0 {
+		// Perform bulk write to MongoDB
+		if err := db.InsertBulk("TRACK_DATA", *batch); err != nil {
+			log.Printf("Error during bulk write: %v", err)
+		} else {
+			log.Printf("Batch flushed to MongoDB with %d documents", len(*batch))
+		}
+
+		// Clear batch to release memory
+		*batch = nil
 	}
 }
