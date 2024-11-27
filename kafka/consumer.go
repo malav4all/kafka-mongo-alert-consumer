@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/malav4all/kafka-mongodb-consumer/mongodb"
+	"github.com/malav4all/kafka-mongo-alert-consumer/mongodb"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -107,7 +107,7 @@ func flush(batch *[]map[string]interface{}, db mongodb.Database, mutex *sync.Mut
 
 	if len(*batch) > 0 {
 		// Perform bulk write to MongoDB
-		if err := db.InsertBulk("TRACK_DATA", *batch); err != nil {
+		if err := db.InsertBulk("ALERT_DATA", *batch); err != nil {
 			log.Printf("Error during bulk write: %v", err)
 		} else {
 			log.Printf("Batch flushed to MongoDB with %d documents", len(*batch))

@@ -3,10 +3,10 @@ package main
 import (
 	"log"
 
-	"github.com/malav4all/kafka-mongodb-consumer/kafka"
-	"github.com/malav4all/kafka-mongodb-consumer/mongodb"
+	"github.com/malav4all/kafka-mongo-alert-consumer/kafka"
+	"github.com/malav4all/kafka-mongo-alert-consumer/mongodb"
 
-	"github.com/malav4all/kafka-mongodb-consumer/config"
+	"github.com/malav4all/kafka-mongo-alert-consumer/config"
 )
 
 func main() {

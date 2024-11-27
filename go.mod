@@ -1,4 +1,4 @@
-module github.com/malav4all/kafka-mongodb-consumer
+module github.com/malav4all/kafka-mongo-alert-consumer
 
 go 1.22.3
 
